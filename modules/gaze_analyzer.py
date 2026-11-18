@@ -3,13 +3,7 @@ import numpy as np
 
 
 class GazeAnalyzer:
-    """
-    Modul Anggota 2: Perhitungan EAR, Rasio Lirikan Iris, Orientasi Kepala (solvePnP),
-    dan Penentuan Status Fokus Belajar.
-    """
 
-    # Koordinat model 3D wajah kanonik dalam sistem koordinat kamera OpenCV
-    # (+X ke kanan layar, +Y ke bawah layar, +Z menjauhi lensa kamera)
     MODEL_3D_POINTS = np.array([
         (0.0, 0.0, 0.0),            # 1: Ujung Hidung
         (0.0, 330.0, 65.0),         # 152: Dagu
@@ -35,21 +29,21 @@ class GazeAnalyzer:
         self.pitch_threshold = pitch_threshold
         self.drowsy_frames_limit = drowsy_frames_limit
 
-        # Counter untuk membedakan kedipan normal dengan kantuk/merem lama
+        # Offset kalibrasi untuk menyesuaikan posisi duduk & sudut kamera
+        self.pitch_offset = 0.0
+        self.yaw_offset = 0.0
+        self.gaze_offset = 0.0
+        self.is_calibrated = False
+
         self.closed_eye_frames = 0
         self.total_frames = 0
         self.focused_frames = 0
 
     @staticmethod
     def _euclidean_dist(pt1, pt2):
-        """Menghitung jarak Euclidean antara dua titik 2D."""
         return np.linalg.norm(pt1.astype(np.float64) - pt2.astype(np.float64))
 
     def calculate_single_ear(self, eye_pts):
-        """
-        Menghitung Eye Aspect Ratio (EAR) dari 6 titik kelopak mata.
-        Urutan indeks eye_pts: [p1(0), p2(1), p3(2), p4(3), p5(4), p6(5)]
-        """
         vert_1 = self._euclidean_dist(eye_pts[1], eye_pts[5])
         vert_2 = self._euclidean_dist(eye_pts[2], eye_pts[4])
         horiz = self._euclidean_dist(eye_pts[0], eye_pts[3])
@@ -59,10 +53,6 @@ class GazeAnalyzer:
         return (vert_1 + vert_2) / (2.0 * horiz)
 
     def calculate_gaze_ratio(self, eye_pts, iris_center):
-        """
-        Menghitung posisi relatif horizontal iris menggunakan proyeksi vektor
-        dari sudut kiri ke sudut kanan mata (0.0 = kiri, 0.5 = tengah, 1.0 = kanan).
-        """
         p_ext_1, p_ext_2 = eye_pts[0], eye_pts[3]
         left_corner = p_ext_1 if p_ext_1[0] < p_ext_2[0] else p_ext_2
         right_corner = p_ext_2 if p_ext_1[0] < p_ext_2[0] else p_ext_1
@@ -78,9 +68,6 @@ class GazeAnalyzer:
         return float(np.clip(ratio, 0.0, 1.0))
 
     def estimate_head_pose(self, pose_2d, frame_size):
-        """
-        Menghitung sudut Pitch, Yaw, dan Roll kepala menggunakan algoritma solvePnP.
-        """
         h, w = frame_size
         focal_length = float(w)
         center = (w / 2.0, h / 2.0)
@@ -106,12 +93,10 @@ class GazeAnalyzer:
 
         rot_mat, _ = cv2.Rodrigues(rvec)
 
-        # Ekstraksi sudut Euler (dalam derajat) yang terkalibrasi di sekitar 0 derajat
         pitch = np.degrees(np.arctan2(-rot_mat[1, 2], rot_mat[2, 2]))
         yaw = np.degrees(np.arctan2(rot_mat[0, 2], np.sqrt(rot_mat[1, 2] ** 2 + rot_mat[2, 2] ** 2)))
         roll = np.degrees(np.arctan2(rot_mat[1, 0], rot_mat[0, 0]))
 
-        # Proyeksi garis vektor arah hidung untuk visualisasi di layar
         nose_end_3d = np.array([(0.0, 0.0, -450.0)], dtype=np.float64)
         nose_end_2d, _ = cv2.projectPoints(nose_end_3d, rvec, tvec, camera_matrix, dist_coeffs)
         p1 = (int(pose_2d[0][0]), int(pose_2d[0][1]))
@@ -119,11 +104,29 @@ class GazeAnalyzer:
 
         return pitch, yaw, roll, (p1, p2)
 
+    def calibrate(self, features):
+        """
+        Menyimpan sudut kepala dan posisi iris saat ini sebagai titik tengah (0 derajat dan rasio 0.50).
+        Panggil fungsi ini saat pengguna sedang menatap lurus ke tengah layar.
+        """
+        if features is None:
+            return False
+
+        gaze_left = self.calculate_gaze_ratio(features["left_eye"], features["left_iris"])
+        gaze_right = self.calculate_gaze_ratio(features["right_eye"], features["right_iris"])
+        raw_gaze = (gaze_left + gaze_right) / 2.0
+
+        raw_pitch, raw_yaw, _, _ = self.estimate_head_pose(
+            features["pose_2d"], features["frame_size"]
+        )
+
+        self.pitch_offset = raw_pitch
+        self.yaw_offset = raw_yaw
+        self.gaze_offset = raw_gaze - 0.50
+        self.is_calibrated = True
+        return True
+
     def analyze(self, features):
-        """
-        Menggabungkan seluruh metrik (EAR, Gaze Ratio, dan Head Pose) untuk
-        menentukan status fokus pengguna pada frame saat ini.
-        """
         self.total_frames += 1
 
         if features is None:
@@ -140,22 +143,21 @@ class GazeAnalyzer:
                 "nose_line": None
             }
 
-        # 1. Hitung rata-rata EAR mata kiri dan kanan
         ear_left = self.calculate_single_ear(features["left_eye"])
         ear_right = self.calculate_single_ear(features["right_eye"])
         avg_ear = (ear_left + ear_right) / 2.0
 
-        # 2. Hitung rata-rata rasio lirikan horizontal iris
         gaze_left = self.calculate_gaze_ratio(features["left_eye"], features["left_iris"])
         gaze_right = self.calculate_gaze_ratio(features["right_eye"], features["right_iris"])
-        avg_gaze = (gaze_left + gaze_right) / 2.0
+        raw_gaze = (gaze_left + gaze_right) / 2.0
+        avg_gaze = float(np.clip(raw_gaze - self.gaze_offset, 0.0, 1.0))
 
-        # 3. Estimasi orientasi kepala 3D
-        pitch, yaw, roll, nose_line = self.estimate_head_pose(
+        raw_pitch, raw_yaw, roll, nose_line = self.estimate_head_pose(
             features["pose_2d"], features["frame_size"]
         )
+        pitch = raw_pitch - self.pitch_offset
+        yaw = raw_yaw - self.yaw_offset
 
-        # 4. Klasifikasi arah lirikan mata
         if avg_gaze < self.gaze_left_thresh:
             gaze_dir = "Melirik Kiri"
         elif avg_gaze > self.gaze_right_thresh:
@@ -163,7 +165,6 @@ class GazeAnalyzer:
         else:
             gaze_dir = "Tengah (Layar)"
 
-        # 5. Evaluasi pohon keputusan (Decision Tree) status fokus
         if avg_ear < self.ear_threshold:
             self.closed_eye_frames += 1
         else:
@@ -204,7 +205,6 @@ class GazeAnalyzer:
         }
 
     def get_focus_percentage(self):
-        """Mengembalikan persentase kumulatif tingkat fokus selama sesi berlangsung."""
         if self.total_frames == 0:
             return 100.0
         return (self.focused_frames / self.total_frames) * 100.0
