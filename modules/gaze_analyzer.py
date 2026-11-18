@@ -22,6 +22,14 @@ class GazeAnalyzer:
         pitch_threshold=18.0,
         drowsy_frames_limit=15
     ):
+        # Variabel filter penghalus (EMA) & counter toleransi distraksi
+        self.ema_alpha = 0.35
+        self.smooth_gaze = 0.50
+        self.smooth_pitch = 0.0
+        self.smooth_yaw = 0.0
+        self.distracted_frames = 0
+        self.distraction_limit = 12
+
         self.ear_threshold = ear_threshold
         self.gaze_left_thresh = gaze_left_thresh
         self.gaze_right_thresh = gaze_right_thresh
@@ -128,6 +136,15 @@ class GazeAnalyzer:
 
     def analyze(self, features):
         self.total_frames += 1
+
+        # Terapkan Exponential Moving Average (EMA) agar angka tidak melompat-lompat
+        self.smooth_gaze = (self.ema_alpha * avg_gaze) + ((1 - self.ema_alpha) * self.smooth_gaze)
+        self.smooth_pitch = (self.ema_alpha * pitch) + ((1 - self.ema_alpha) * self.smooth_pitch)
+        self.smooth_yaw = (self.ema_alpha * yaw) + ((1 - self.ema_alpha) * self.smooth_yaw)
+
+        avg_gaze = self.smooth_gaze
+        pitch = self.smooth_pitch
+        yaw = self.smooth_yaw
 
         if features is None:
             return {

@@ -71,13 +71,20 @@ class FaceMeshDetector:
             )
             self.detector = vision.FaceLandmarker.create_from_options(options)
 
-    def extract_features(self, frame):
-        """
-        Memproses frame BGR dari OpenCV dan mengembalikan dictionary berisi
-        koordinat piksel (2D) dari mata, iris, dan titik referensi kepala.
-        """
+    @staticmethod
+    def apply_clahe(frame):
+        """Meningkatkan kontras wajah secara adaptif pada kondisi ruangan redup."""
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        cl = clahe.apply(l_channel)
+        merged = cv2.merge((cl, a_channel, b_channel))
+        return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
+    def extract_features(self, frame, use_clahe=True):
         h, w, _ = frame.shape
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        proc_frame = self.apply_clahe(frame) if use_clahe else frame
+        rgb_frame = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGB)
         raw_landmarks = None
 
         if self.use_legacy:
